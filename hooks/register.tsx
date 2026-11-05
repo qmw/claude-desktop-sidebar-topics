@@ -1,20 +1,22 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
-import type { NeedsInputItem, NeedsInputKind, NeedsInputSnapshot } from '../types'
+import type { LocalItem, NeedsInputItem, NeedsInputKind, NeedsInputSnapshot } from '../types'
 
 // ---------------------------------------------------------------------------
-// desktop-sidebar-topics: a pane that lists the sessions waiting for the person's answer.
+// desktop-sidebar-topics: a pane with two sections.
 //
-// Data source: the desktop app's own session-management MCP server
-// (`ccd_session_mgmt`): `list_sessions` for the rows, `list_events` for the
-// tail of each idle session's transcript, from which the kind of input it
-// waits for is derived. Nothing is invented: a session is listed only when
-// its transcript ends in an unanswered question, an AskUserQuestion prompt
-// or a tool call that never got its result (a permission prompt).
+// 1. This conversation: the questions the assistant asked since the person's
+//    last prompt (plain questions, AskUserQuestion prompts, a wrap-up's ask),
+//    read from `$.session.messages()`. A click quotes the question into the
+//    prompt box; a tick dismisses it.
+// 2. Other sessions: the sessions of this app that wait for the person, read
+//    from the app's session-management MCP server (`ccd_session_mgmt`):
+//    `list_sessions` for the rows, `list_events` for each transcript's tail.
+//
+// Nothing is invented: a row appears only when the transcript says so.
 // ---------------------------------------------------------------------------
 
-const PLUGIN = 'desktop-sidebar-topics'
 const PANE = 'sidebar-topics'
 const COMMAND = 'sidebar-topics'
 const SERVER = 'ccd_session_mgmt'
@@ -22,6 +24,7 @@ const WINDOW_SERVER = 'ccd_window'
 const STORE_HIDDEN = 'hidden'
 
 const EMPTY: NeedsInputSnapshot = {
+  local: [],
   items: [],
   checkedAt: 0,
   checked: 0,
@@ -32,7 +35,10 @@ const EMPTY: NeedsInputSnapshot = {
 // Change the tag when the snapshot's fields change: an older stored value is
 // then read as EMPTY instead of crashing the drawing.
 const snapshot = atom({ plugin: 'desktop-sidebar-topics', key: 'snapshot' } as const, EMPTY, {
-  shape: 'snapshot-1',
+  shape: 'snapshot-2',
+})
+const dismissed = atom({ plugin: 'desktop-sidebar-topics', key: 'dismissed' } as const, [] as string[], {
+  shape: 'dismissed-1',
 })
 
 type Lang = 'pl' | 'en'
@@ -40,44 +46,66 @@ type Lang = 'pl' | 'en'
 const WORDS = {
   pl: {
     title: 'Czeka na Ciebie',
-    none: 'Nic nie czeka na Twoją odpowiedź.',
+    thisSession: 'Ta rozmowa',
+    others: 'Inne sesje',
+    noneLocal: 'Brak otwartych pytań w tej rozmowie.',
+    noneOthers: 'Żadna inna sesja nie czeka na odpowiedź.',
     checking: 'Sprawdzam sesje…',
     checked: (n: number, at: string) => `sprawdzono ${n} sesji o ${at}`,
     refresh: 'Odśwież',
-    close: 'Zamknij',
+    done: 'załatwione',
     kinds: {
       question: 'pytanie',
       choice: 'wybór opcji',
       approval: 'zgoda na narzędzie',
+      decision: 'decyzja',
     } as Record<NeedsInputKind, string>,
+    quoted: 'Pytanie wstawione do pola odpowiedzi.',
+    quoteFailed: 'Nie mogę wstawić do pola; pytanie skopiowane do schowka.',
     opened: (t: string) => `Otwieram: ${t}`,
     copied: 'Nie mogę przełączyć sesji z moda. Link skopiowany do schowka; otwórz sesję z paska bocznego lub wklej link w przeglądarce.',
     newItems: (n: number) => (n === 1 ? '1 sesja czeka na Twoją odpowiedź' : `${n} sesje czekają na Twoją odpowiedź`),
     paneOpened: 'Panel „Czeka na Ciebie” otwarty.',
     paneClosed: 'Panel „Czeka na Ciebie” zamknięty.',
     refreshed: 'Lista odświeżona.',
-    status: (n: number) => (n === 0 ? undefined : `⏳ ${n} czeka na odpowiedź`),
+    status: (local: number, others: number) => {
+      const parts: string[] = []
+      if (local > 0) parts.push(`${local} tu`)
+      if (others > 0) parts.push(`${others} w innych sesjach`)
+      return parts.length === 0 ? undefined : `⏳ czeka: ${parts.join(', ')}`
+    },
     ago: (s: number) => (s < 60 ? 'przed chwilą' : s < 3600 ? `${Math.floor(s / 60)} min` : s < 86400 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} d`),
   },
   en: {
     title: 'Needs your input',
-    none: 'Nothing is waiting for your answer.',
+    thisSession: 'This conversation',
+    others: 'Other sessions',
+    noneLocal: 'No open questions in this conversation.',
+    noneOthers: 'No other session is waiting for your answer.',
     checking: 'Checking sessions…',
     checked: (n: number, at: string) => `checked ${n} sessions at ${at}`,
     refresh: 'Refresh',
-    close: 'Close',
+    done: 'done',
     kinds: {
       question: 'question',
       choice: 'choice to make',
       approval: 'tool approval',
+      decision: 'decision',
     } as Record<NeedsInputKind, string>,
+    quoted: 'Question quoted into the prompt box.',
+    quoteFailed: 'Could not fill the prompt box; question copied to the clipboard.',
     opened: (t: string) => `Opening: ${t}`,
     copied: 'The mod cannot switch sessions on this surface. Link copied to the clipboard; open the session from the sidebar or paste the link in a browser.',
     newItems: (n: number) => (n === 1 ? '1 session waits for your answer' : `${n} sessions wait for your answer`),
     paneOpened: 'Sidebar-topics pane opened.',
     paneClosed: 'Sidebar-topics pane closed.',
     refreshed: 'List refreshed.',
-    status: (n: number) => (n === 0 ? undefined : `⏳ ${n} waiting for you`),
+    status: (local: number, others: number) => {
+      const parts: string[] = []
+      if (local > 0) parts.push(`${local} here`)
+      if (others > 0) parts.push(`${others} in other sessions`)
+      return parts.length === 0 ? undefined : `⏳ waiting: ${parts.join(', ')}`
+    },
     ago: (s: number) => (s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min` : s < 86400 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} d`),
   },
 } as const
@@ -86,10 +114,109 @@ const KIND_GLYPH: Record<NeedsInputKind, string> = {
   question: '❓',
   choice: '☑',
   approval: '🔒',
+  decision: '⚖',
 }
 
 // ---------------------------------------------------------------------------
-// Reading the app's session data
+// Section 1: this conversation's open questions
+// ---------------------------------------------------------------------------
+
+function cleanLine(raw: string): string {
+  return raw
+    .replace(/[*_`#>]+/g, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s*(?:[-•]|\d+[.)])\s+/, '')
+    .trim()
+}
+
+function cut(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max - 1) + '…' : text
+}
+
+/** The questions in an assistant message's text: lines ending with `?`. */
+function questionsIn(text: string): string[] {
+  const out: string[] = []
+  for (const raw of text.split('\n')) {
+    const line = cleanLine(raw)
+    if (!line.endsWith('?')) continue
+    // Of a line with several sentences, the question is the last one.
+    const sentences = line.split(/(?<=[.!?])\s+/)
+    const question = sentences.filter(s => s.endsWith('?')).pop() ?? line
+    if (question.length >= 8) out.push(cut(question, 160))
+  }
+  return out
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+}
+
+/** The open questions of this conversation: asked since the person's last prompt. */
+function collectLocal(rows: readonly SessionMessage[]): LocalItem[] {
+  let lastPrompt = -1
+  rows.forEach((row, index) => {
+    if (row.role === 'user' && row.text.trim() !== '') lastPrompt = index
+  })
+  const items: LocalItem[] = []
+  for (let index = lastPrompt + 1; index < rows.length; index += 1) {
+    const row = rows[index]!
+    if (row.role !== 'assistant') continue
+    for (const use of row.toolUses) {
+      const input = asRecord(use.input)
+      if (use.tool === 'AskUserQuestion' && use.text === undefined && use.result === undefined) {
+        const questions = Array.isArray(input['questions']) ? (input['questions'] as unknown[]) : []
+        for (const one of questions) {
+          const question = asRecord(one)['question']
+          if (typeof question === 'string' && question.trim() !== '') {
+            items.push({ key: `${index}:${use.tool_use_id}:${question}`, question: cut(question.trim(), 160), kind: 'choice', messageIndex: index })
+          }
+        }
+      } else if (use.tool.endsWith('__wrap_up')) {
+        const ask = input['ask']
+        if (typeof ask === 'string' && ask.trim() !== '') {
+          items.push({ key: `${index}:${use.tool_use_id}`, question: cut(ask.trim(), 160), kind: 'decision', messageIndex: index })
+        }
+      }
+    }
+    for (const question of questionsIn(row.text)) {
+      items.push({ key: `${index}:${question}`, question, kind: 'question', messageIndex: index })
+    }
+  }
+  // The same question asked twice (a wrap-up's ask repeated in the text) shows once.
+  const seen = new Set<string>()
+  return items.filter(item => {
+    const norm = item.question.toLowerCase().replace(/\s+/g, ' ')
+    if (seen.has(norm)) return false
+    seen.add(norm)
+    return true
+  })
+}
+
+async function readLocal($: EngineInterface): Promise<LocalItem[]> {
+  const rows = await $.session.messages()
+  return Array.isArray(rows) ? collectLocal(rows) : []
+}
+
+async function quoteIntoPrompt($: EngineInterface, item: LocalItem, lang: Lang): Promise<void> {
+  const words = WORDS[lang]
+  const text = `> ${item.question}\n`
+  try {
+    await $.prompt.fill({ text, mode: 'insert' })
+    $.ui.toast(words.quoted)
+    return
+  } catch {
+    // fall through
+  }
+  try {
+    await $.ui.copy({ text: item.question })
+  } catch {
+    // nothing to do
+  }
+  $.ui.toast(words.quoteFailed)
+}
+
+// ---------------------------------------------------------------------------
+// Section 2: other sessions, read from the app's session service
 // ---------------------------------------------------------------------------
 
 type SessionRow = {
@@ -143,18 +270,18 @@ const CALLED = /^\(called ([^)]+)\)\s*$/
 function oneLine(text: string, max = 120): string {
   const lines = text
     .split('\n')
-    .map(line => line.replace(/[*_`#>]+/g, '').trim())
+    .map(cleanLine)
     .filter(line => line.length > 0)
   // The question is usually the last line; prefer it when it is one.
   const last = lines[lines.length - 1] ?? ''
   const pick = last.endsWith('?') ? last : lines.find(line => line.endsWith('?')) ?? last
-  return pick.length > max ? pick.slice(0, max - 1) + '…' : pick
+  return cut(pick, max)
 }
 
 type Need = { kind: NeedsInputKind; summary: string; pendingTool?: string }
 
 /**
- * What a session's transcript tail says it is waiting for, or null.
+ * What another session's transcript tail says it is waiting for, or null.
  *
  * A session blocked at a prompt (AskUserQuestion, a permission dialog) is
  * reported by the app as running, so `isRunning` decides nothing by itself:
@@ -167,9 +294,6 @@ function deriveNeed(transcript: string, isRunning: boolean): Need | null {
   if (entries.length === 0) return null
   const last = entries[entries.length - 1]!
 
-  // Last assistant text said before the final entry: the question itself.
-  // With none (the question was asked straight away), the person's own last
-  // prompt names the topic.
   const lastSaid = [...entries]
     .reverse()
     .find(entry => entry.tag === 'assistant' && !CALLED.test(entry.text.trim()))
@@ -195,8 +319,6 @@ function deriveNeed(transcript: string, isRunning: boolean): Need | null {
   if (isRunning) return null
 
   if (last.tag === 'result') {
-    // A wrap-up's result follows the closing message in some renderings: the
-    // question is then the assistant text right before it.
     const previous = entries[entries.length - 2]
     if (previous && previous.tag === 'assistant' && !CALLED.test(previous.text.trim())) {
       const said = oneLine(previous.text)
@@ -207,10 +329,6 @@ function deriveNeed(transcript: string, isRunning: boolean): Need | null {
   return null
 }
 
-// ---------------------------------------------------------------------------
-// The refresh
-// ---------------------------------------------------------------------------
-
 type Verdict = { lastActivityAt: string; item: NeedsInputItem | null }
 // A cache per idle session, keyed by its last activity: an unchanged session is
 // not read again. Module state: a reload simply recomputes.
@@ -219,8 +337,87 @@ const verdicts = new Map<string, Verdict>()
 const pending = new Map<string, { tool: string; since: number }>()
 // A tool call pending this long in a running session is taken for a prompt.
 const PENDING_MS = 60_000
-let isRefreshing = false
-let knownIds: Set<string> | null = null
+
+async function collectOthers($: EngineInterface, options: Options, now: number): Promise<{ items: NeedsInputItem[]; checked: number; rows: number }> {
+  const rows = await listSessions($, options.maxSessions)
+  const items: NeedsInputItem[] = []
+  let checked = 0
+  for (const row of rows) {
+    if (row.isArchived) continue
+    const isRunning = row.isRunning === true
+    const lastActivityAt = row.lastActivityAt ?? ''
+    const age = lastActivityAt ? now - Date.parse(lastActivityAt) : Infinity
+    if (!isRunning && !(age < options.maxAgeMs)) continue
+    checked += 1
+    const cached = verdicts.get(row.sessionId)
+    let item: NeedsInputItem | null
+    if (!isRunning && cached && cached.lastActivityAt === lastActivityAt) {
+      item = cached.item
+    } else {
+      const result = await $.mcp.call(SERVER, 'list_events', { session_id: row.sessionId, limit: 8 })
+      let need = result.isError ? null : deriveNeed(textOf(result), isRunning)
+      if (need?.pendingTool !== undefined && isRunning) {
+        const seen = pending.get(row.sessionId)
+        const since = seen && seen.tool === need.pendingTool ? seen.since : now
+        pending.set(row.sessionId, { tool: need.pendingTool, since })
+        if (now - since < PENDING_MS) need = null
+      } else {
+        pending.delete(row.sessionId)
+      }
+      item = need
+        ? {
+            sessionId: row.sessionId,
+            title: row.title ?? row.sessionId,
+            summary: need.summary,
+            kind: need.kind,
+            since: lastActivityAt || new Date(now).toISOString(),
+            link: row.link ?? `claude://claude.ai/epitaxy/${row.sessionId}`,
+          }
+        : null
+      if (isRunning) verdicts.delete(row.sessionId)
+      else verdicts.set(row.sessionId, { lastActivityAt, item })
+    }
+    if (item) items.push(item)
+  }
+  const listed = new Set(rows.map(row => row.sessionId))
+  for (const id of [...verdicts.keys()]) if (!listed.has(id)) verdicts.delete(id)
+  for (const id of [...pending.keys()]) if (!listed.has(id)) pending.delete(id)
+  items.sort((a, b) => Date.parse(b.since) - Date.parse(a.since))
+  return { items, checked, rows: rows.length }
+}
+
+async function openSession($: EngineInterface, item: NeedsInputItem, lang: Lang): Promise<void> {
+  const words = WORDS[lang]
+  try {
+    const result = await $.mcp.call(WINDOW_SERVER, 'open_session_in', { session_id: item.sessionId, target: 'focus' })
+    const text = textOf(result)
+    if (!result.isError && !/^refused|refused:|cannot|not started from/i.test(text)) {
+      $.ui.toast(words.opened(item.title))
+      return
+    }
+  } catch {
+    // fall through
+  }
+  try {
+    const run = await $.process.run(['cmd', '/c', 'start', '', item.link], { timeoutMs: 10_000 })
+    if (run.exitCode === 0) {
+      $.ui.toast(words.opened(item.title))
+      return
+    }
+  } catch {
+    // fall through
+  }
+  try {
+    await $.ui.copy({ text: item.link })
+  } catch {
+    // nothing to do
+  }
+  $.ui.toast(words.copied, { timeoutMs: 8000 })
+}
+
+// ---------------------------------------------------------------------------
+// The refresh
+// ---------------------------------------------------------------------------
 
 type Options = { intervalMs: number; maxSessions: number; maxAgeMs: number; lang: Lang; debugFile: string }
 
@@ -233,6 +430,22 @@ async function writeDebug($: EngineInterface, options: Options, record: unknown)
   }
 }
 
+let isRefreshing = false
+let knownIds: Set<string> | null = null
+
+/** Re-reads this conversation only: cheap, run after every turn. */
+async function refreshLocal($: EngineInterface, options: Options): Promise<void> {
+  try {
+    const local = await readLocal($)
+    const snap = await update($, snapshot, snap => ({ ...snap, local }))
+    $.ui.status(WORDS[options.lang].status(local.length, snap.items.length))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    await update($, snapshot, snap => ({ ...snap, error: message }))
+  }
+}
+
+/** Re-reads both sections. */
 async function refresh($: EngineInterface, options: Options, isAsked = false): Promise<void> {
   if (isRefreshing) return
   isRefreshing = true
@@ -240,61 +453,23 @@ async function refresh($: EngineInterface, options: Options, isAsked = false): P
   try {
     await update($, snapshot, snap => ({ ...snap, isChecking: true }))
     const now = await $.clock.now()
-    const rows = await listSessions($, options.maxSessions)
-    const items: NeedsInputItem[] = []
-    let checked = 0
-    for (const row of rows) {
-      if (row.isArchived) continue
-      const isRunning = row.isRunning === true
-      const lastActivityAt = row.lastActivityAt ?? ''
-      const age = lastActivityAt ? now - Date.parse(lastActivityAt) : Infinity
-      if (!isRunning && !(age < options.maxAgeMs)) continue
-      checked += 1
-      const cached = verdicts.get(row.sessionId)
-      let item: NeedsInputItem | null
-      if (!isRunning && cached && cached.lastActivityAt === lastActivityAt) {
-        item = cached.item
-      } else {
-        const result = await $.mcp.call(SERVER, 'list_events', { session_id: row.sessionId, limit: 8 })
-        let need = result.isError ? null : deriveNeed(textOf(result), isRunning)
-        if (need?.pendingTool !== undefined && isRunning) {
-          // A running session's pending call counts once it has stayed pending.
-          const seen = pending.get(row.sessionId)
-          const since = seen && seen.tool === need.pendingTool ? seen.since : now
-          pending.set(row.sessionId, { tool: need.pendingTool, since })
-          if (now - since < PENDING_MS) need = null
-        } else {
-          pending.delete(row.sessionId)
-        }
-        item = need
-          ? {
-              sessionId: row.sessionId,
-              title: row.title ?? row.sessionId,
-              summary: need.summary,
-              kind: need.kind,
-              since: lastActivityAt || new Date(now).toISOString(),
-              link: row.link ?? `claude://claude.ai/epitaxy/${row.sessionId}`,
-            }
-          : null
-        if (isRunning) verdicts.delete(row.sessionId)
-        else verdicts.set(row.sessionId, { lastActivityAt, item })
-      }
-      if (item) items.push(item)
-    }
-    // Forget sessions that are no longer listed.
-    const listed = new Set(rows.map(row => row.sessionId))
-    for (const id of [...verdicts.keys()]) if (!listed.has(id)) verdicts.delete(id)
-    for (const id of [...pending.keys()]) if (!listed.has(id)) pending.delete(id)
-
-    items.sort((a, b) => Date.parse(b.since) - Date.parse(a.since))
+    const local = await readLocal($)
+    const others = await collectOthers($, options, now)
     const finishedAt = await $.clock.now()
-    await update($, snapshot, () => ({ items, checkedAt: finishedAt, checked, error: null, isChecking: false }))
-    $.ui.status(words.status(items.length))
-    await writeDebug($, options, { finishedAt: new Date(finishedAt).toISOString(), checked, rows: rows.length, items })
+    await update($, snapshot, () => ({
+      local,
+      items: others.items,
+      checkedAt: finishedAt,
+      checked: others.checked,
+      error: null,
+      isChecking: false,
+    }))
+    $.ui.status(words.status(local.length, others.items.length))
+    await writeDebug($, options, { finishedAt: new Date(finishedAt).toISOString(), local, checked: others.checked, rows: others.rows, items: others.items })
 
-    const ids = new Set(items.map(item => item.sessionId))
+    const ids = new Set(others.items.map(item => item.sessionId))
     if (knownIds !== null) {
-      const fresh = items.filter(item => !knownIds!.has(item.sessionId))
+      const fresh = others.items.filter(item => !knownIds!.has(item.sessionId))
       if (fresh.length > 0) $.ui.toast(`${words.newItems(fresh.length)}: ${fresh.map(item => item.title).join(', ')}`)
     }
     knownIds = ids
@@ -306,42 +481,6 @@ async function refresh($: EngineInterface, options: Options, isAsked = false): P
   } finally {
     isRefreshing = false
   }
-}
-
-// ---------------------------------------------------------------------------
-// Opening a session from the list
-// ---------------------------------------------------------------------------
-
-async function openSession($: EngineInterface, item: NeedsInputItem, lang: Lang): Promise<void> {
-  const words = WORDS[lang]
-  // 1. The app's own window tool: works for this session's own family.
-  try {
-    const result = await $.mcp.call(WINDOW_SERVER, 'open_session_in', { session_id: item.sessionId, target: 'focus' })
-    const text = textOf(result)
-    if (!result.isError && !/^refused|refused:|cannot|not started from/i.test(text)) {
-      $.ui.toast(words.opened(item.title))
-      return
-    }
-  } catch {
-    // fall through
-  }
-  // 2. The app link through the host's protocol handler (CLI sessions).
-  try {
-    const run = await $.process.run(['cmd', '/c', 'start', '', item.link], { timeoutMs: 10_000 })
-    if (run.exitCode === 0) {
-      $.ui.toast(words.opened(item.title))
-      return
-    }
-  } catch {
-    // fall through
-  }
-  // 3. Hand the person the link.
-  try {
-    await $.ui.copy({ text: item.link })
-  } catch {
-    // nothing to do
-  }
-  $.ui.toast(words.copied, { timeoutMs: 8000 })
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +522,7 @@ export const register: Register = (on, rawOptions) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: COMMAND,
-      description: 'Toggle the pane listing sessions waiting for your input (args: on, off, refresh)',
+      description: 'Toggle the pane listing questions waiting for your input (args: on, off, refresh)',
       argumentHint: '[on|off|refresh]',
     })
     const isHidden = (await $.store.get(STORE_HIDDEN)) === true
@@ -392,6 +531,19 @@ export const register: Register = (on, rawOptions) => {
     $.clock.every(options.intervalMs, () => void refresh($, options))
 
     return next(e)
+  })
+
+  // This conversation's section follows the turns closely.
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) $.clock.after(500, () => void refreshLocal($, options))
+    return result
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    const result = await next(e)
+    $.clock.after(1000, () => void refreshLocal($, options))
+    return result
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
@@ -421,6 +573,8 @@ export const register: Register = (on, rawOptions) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const snap = await read($, snapshot)
+    const ticked = new Set(await read($, dismissed))
+    const local = snap.local.filter(item => !ticked.has(item.key))
     const now = Date.now()
     const columns = Math.max(20, e.props.bodyColumns || 40)
 
@@ -429,7 +583,7 @@ export const register: Register = (on, rawOptions) => {
         <Box justifyContent="space-between">
           <Text bold>
             {words.title}
-            {snap.items.length > 0 ? ` (${snap.items.length})` : ''}
+            {local.length + snap.items.length > 0 ? ` (${local.length + snap.items.length})` : ''}
           </Text>
           <Button key="refresh" plain dimColor onPress={() => void refresh($, options, true)}>
             ↻ {words.refresh}
@@ -437,25 +591,52 @@ export const register: Register = (on, rawOptions) => {
         </Box>
 
         {snap.error !== null && <Text color="red">{snap.error}</Text>}
-        {snap.items.length === 0 && !snap.isChecking && <Text dimColor>{words.none}</Text>}
-        {snap.items.length === 0 && snap.isChecking && <Text dimColor>{words.checking}</Text>}
 
-        {snap.items.map(item => {
-          const seconds = Math.max(0, Math.round((now - Date.parse(item.since)) / 1000))
-          return (
-            <Box key={`row-${item.sessionId}`} flexDirection="column">
-              <Button key={`open-${item.sessionId}`} plain onPress={() => void openSession($, item, options.lang)}>
-                {KIND_GLYPH[item.kind]} {item.title}
-                <Text dimColor> · {words.ago(seconds)}</Text>
+        <Box flexDirection="column">
+          <Text bold size="footnote">
+            {words.thisSession}
+            {local.length > 0 ? ` (${local.length})` : ''}
+          </Text>
+          {local.length === 0 && <Text dimColor>{words.noneLocal}</Text>}
+          {local.map(item => (
+            <Box key={`local-${item.key}`} flexDirection="column">
+              <Button key={`quote-${item.key}`} plain onPress={() => void quoteIntoPrompt($, item, options.lang)}>
+                {KIND_GLYPH[item.kind]} {item.question}
               </Button>
               <Box paddingLeft={3} width={columns}>
-                <Text dimColor wrap="wrap">
-                  {words.kinds[item.kind]}: {item.summary}
-                </Text>
+                <Text dimColor>{words.kinds[item.kind]} · </Text>
+                <Button key={`done-${item.key}`} plain dimColor onPress={() => void update($, dismissed, keys => [...keys, item.key].slice(-500))}>
+                  ✓ {words.done}
+                </Button>
               </Box>
             </Box>
-          )
-        })}
+          ))}
+        </Box>
+
+        <Box flexDirection="column">
+          <Text bold size="footnote">
+            {words.others}
+            {snap.items.length > 0 ? ` (${snap.items.length})` : ''}
+          </Text>
+          {snap.items.length === 0 && !snap.isChecking && <Text dimColor>{words.noneOthers}</Text>}
+          {snap.items.length === 0 && snap.isChecking && <Text dimColor>{words.checking}</Text>}
+          {snap.items.map(item => {
+            const seconds = Math.max(0, Math.round((now - Date.parse(item.since)) / 1000))
+            return (
+              <Box key={`row-${item.sessionId}`} flexDirection="column">
+                <Button key={`open-${item.sessionId}`} plain onPress={() => void openSession($, item, options.lang)}>
+                  {KIND_GLYPH[item.kind]} {item.title}
+                  <Text dimColor> · {words.ago(seconds)}</Text>
+                </Button>
+                <Box paddingLeft={3} width={columns}>
+                  <Text dimColor wrap="wrap">
+                    {words.kinds[item.kind]}: {item.summary}
+                  </Text>
+                </Box>
+              </Box>
+            )
+          })}
+        </Box>
 
         <Text dimColor size="footnote">
           {snap.isChecking ? words.checking : snap.checkedAt > 0 ? words.checked(snap.checked, clock(snap.checkedAt)) : ''}

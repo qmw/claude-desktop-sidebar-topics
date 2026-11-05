@@ -32,15 +32,32 @@ remove it from the same Plugins menu (or `claude plugin uninstall desktop-sideba
 
 ## What it shows
 
-Every 20 seconds (configurable) the mod asks the app's own session service for
-your recent sessions and reads the tail of each idle session's transcript. A
-session is listed when that tail ends in:
+The pane has two sections.
 
-| Glyph | Kind (pl / en)              | Derived from                                                   |
-| ----- | --------------------------- | -------------------------------------------------------------- |
-| ❓    | pytanie / question          | the session's last message is a question (ends with `?`)       |
-| ☑    | wybór opcji / choice        | an `AskUserQuestion` prompt that has not been answered         |
-| 🔒    | zgoda na narzędzie / approval | a tool call that never got its result (a permission prompt)  |
+**This conversation (Ta rozmowa)**, on top: the questions the assistant asked
+you since your last prompt in the session you are looking at, read from the
+session's own transcript:
+
+| Glyph | Kind (pl / en)          | Derived from                                              |
+| ----- | ----------------------- | --------------------------------------------------------- |
+| ❓    | pytanie / question      | a line of the assistant's reply that ends with `?`        |
+| ☑    | wybór opcji / choice    | an `AskUserQuestion` prompt that has not been answered    |
+| ⚖    | decyzja / decision      | the question in the turn's wrap-up box                    |
+
+Click a question to quote it into the prompt box and answer it; tick ✓ to
+dismiss one without answering. The section refreshes after every turn and
+prompt, and empties once you send your next message (the questions are then
+taken as answered).
+
+**Other sessions (Inne sesje)**, below: every 20 seconds (configurable) the mod
+asks the app's own session service for your recent sessions and reads the tail
+of each session's transcript. A session is listed when that tail ends in:
+
+| Glyph | Kind (pl / en)                | Derived from                                                  |
+| ----- | ----------------------------- | ------------------------------------------------------------- |
+| ❓    | pytanie / question            | the session's last message is a question (ends with `?`)      |
+| ☑    | wybór opcji / choice          | an `AskUserQuestion` prompt that has not been answered        |
+| 🔒    | zgoda na narzędzie / approval | a tool call that never got its result (a permission prompt)   |
 
 Each row shows the session title, how long ago it stopped, the kind of input
 needed and the question itself. The app reports a session blocked at a prompt
@@ -48,10 +65,8 @@ as "running", so running sessions are checked too: a pending `AskUserQuestion`
 counts at once, any other pending tool call only after it has stayed pending
 for a minute (a tool may simply be executing). Archived sessions are never
 listed. Once you answer, the session stops matching and the row disappears on
-the next refresh. New rows raise a toast, and the status line under the prompt shows how
-many sessions wait.
-
-The current session is excluded (the app's session service never lists it).
+the next refresh. New rows raise a toast, and the status line under the prompt
+shows how many questions wait here and in other sessions.
 
 ## Using it
 
@@ -113,7 +128,7 @@ A terminal session loads it the same way, or with
 - `.claude-plugin/plugin.json` — manifest and user options
 - `hooks/hooks.json` — names the hooks module
 - `hooks/register.tsx` — the mod: polling, the pane, the slash command
-- `types/index.d.ts` — the state contract (`desktop-sidebar-topics.snapshot`)
+- `types/index.d.ts` — the state contract (`desktop-sidebar-topics.snapshot`, `.dismissed`)
 - `install.ps1`, `uninstall.ps1` — enable / disable scripts (see above)
 - `tsconfig.json` — extends the type files the engine lays in
   `.claude-plugin/types/` once the mod has loaded (for an editor or `tsc`)

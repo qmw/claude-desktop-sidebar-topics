@@ -1,6 +1,6 @@
 {
   "name": "desktop-sidebar-topics",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A pane listing the Claude Desktop sessions that are waiting for your answer, one click away.",
   "license": "MIT",
   "author": { "name": "Piotr Sobolewski" },
