@@ -1,0 +1,41 @@
+{
+  "name": "desktop-sidebar-topics",
+  "version": "0.1.0",
+  "description": "A pane listing the Claude Desktop sessions that are waiting for your answer, one click away.",
+  "license": "MIT",
+  "author": { "name": "Piotr Sobolewski" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "intervalSeconds": {
+      "type": "number",
+      "title": "Refresh interval (seconds)",
+      "default": 20,
+      "description": "How often the list is refreshed, in seconds."
+    },
+    "maxSessions": {
+      "type": "number",
+      "title": "Sessions checked",
+      "default": 25,
+      "description": "How many recent sessions are checked on each refresh."
+    },
+    "maxAgeDays": {
+      "type": "number",
+      "title": "Max idle age (days)",
+      "default": 14,
+      "description": "Sessions idle for longer than this are not checked."
+    },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "default": "pl",
+      "options": ["pl", "en"],
+      "description": "Language of the pane's labels."
+    },
+    "debugFile": {
+      "type": "string",
+      "title": "Debug file",
+      "default": "",
+      "description": "When set, each refresh writes what the pane lists to this file (troubleshooting only)."
+    }
+  }
+}

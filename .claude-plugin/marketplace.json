@@ -1,0 +1,6 @@
+{
+  "name": "claude-desktop-sidebar-topics",
+  "description": "Mods for the Claude Desktop app: a pane listing the sessions waiting for your input.",
+  "owner": { "name": "qmw" },
+  "plugins": [{ "name": "desktop-sidebar-topics", "source": "./" }]
+}
