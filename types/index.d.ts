@@ -1,5 +1,5 @@
 /** What kind of input a session is waiting for. */
-export type NeedsInputKind = 'question' | 'choice' | 'approval' | 'decision'
+export type NeedsInputKind = 'question' | 'choice' | 'approval' | 'decision' | 'request'
 
 /** One other session that waits for the person. */
 export type NeedsInputItem = {
@@ -35,6 +35,10 @@ export type NeedsInputSnapshot = {
   checkedAt: number
   /** How many other sessions the last refresh looked at. */
   checked: number
+  /** How many sessions the last refresh skipped because a call did not answer in time. */
+  skipped: number
+  /** While checking: "n/m" of the other sessions read so far; null otherwise. */
+  progress: string | null
   error: string | null
   isChecking: boolean
 }

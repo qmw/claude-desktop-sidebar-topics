@@ -28,6 +28,8 @@ const EMPTY: NeedsInputSnapshot = {
   items: [],
   checkedAt: 0,
   checked: 0,
+  skipped: 0,
+  progress: null,
   error: null,
   isChecking: false,
 }
@@ -35,8 +37,24 @@ const EMPTY: NeedsInputSnapshot = {
 // Change the tag when the snapshot's fields change: an older stored value is
 // then read as EMPTY instead of crashing the drawing.
 const snapshot = atom({ plugin: 'desktop-sidebar-topics', key: 'snapshot' } as const, EMPTY, {
-  shape: 'snapshot-2',
+  shape: 'snapshot-3',
 })
+
+// A data call of the app's session service that has not answered by then is
+// skipped for this refresh (an approval dialog nobody answered, a hung server).
+const CALL_TIMEOUT_MS = 15_000
+
+async function withTimeout<T>($: EngineInterface, work: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: { cancel: () => void } | undefined
+  const late = new Promise<undefined>(resolve => {
+    timer = $.clock.after(ms, () => resolve(undefined))
+  })
+  try {
+    return await Promise.race([work, late])
+  } finally {
+    timer?.cancel()
+  }
+}
 const dismissed = atom({ plugin: 'desktop-sidebar-topics', key: 'dismissed' } as const, [] as string[], {
   shape: 'dismissed-1',
 })
@@ -59,7 +77,10 @@ const WORDS = {
       choice: 'wybór opcji',
       approval: 'zgoda na narzędzie',
       decision: 'decyzja',
+      request: 'prośba',
     } as Record<NeedsInputKind, string>,
+    progress: (done: number, total: number) => `sprawdzam sesje ${done}/${total}…`,
+    skipped: (n: number) => `${n} sesji bez odpowiedzi w ${CALL_TIMEOUT_MS / 1000} s (pominięto)`,
     quoted: 'Pytanie wstawione do pola odpowiedzi.',
     quoteFailed: 'Nie mogę wstawić do pola; pytanie skopiowane do schowka.',
     opened: (t: string) => `Otwieram: ${t}`,
@@ -91,7 +112,10 @@ const WORDS = {
       choice: 'choice to make',
       approval: 'tool approval',
       decision: 'decision',
+      request: 'request',
     } as Record<NeedsInputKind, string>,
+    progress: (done: number, total: number) => `checking sessions ${done}/${total}…`,
+    skipped: (n: number) => `${n} sessions did not answer within ${CALL_TIMEOUT_MS / 1000} s (skipped)`,
     quoted: 'Question quoted into the prompt box.',
     quoteFailed: 'Could not fill the prompt box; question copied to the clipboard.',
     opened: (t: string) => `Opening: ${t}`,
@@ -115,7 +139,19 @@ const KIND_GLYPH: Record<NeedsInputKind, string> = {
   choice: '☑',
   approval: '🔒',
   decision: '⚖',
+  request: '✋',
 }
+
+// A line that asks the person for something without a question mark:
+// "Next from you: ...", "I can wait on your OK", "daj znać", "potwierdź".
+const REQUEST_PATTERNS: RegExp[] = [
+  /^(next|now|needed|action|decision|question|questions)\s+(from|for)\s+you\b/i,
+  /^(your|over to you|up to you)\b.*\b(move|call|turn|decision|go|ok|approval|choice)\b/i,
+  /^over to you\b/i,
+  /\b(let me know|tell me|please (confirm|decide|choose|pick|approve|answer|reply)|confirm whether|your ok|your go-ahead|your approval|need your|needs your|waiting (on|for) you|wait on your|up to you|your call|your decision|your choice)\b/i,
+  /^(od ciebie|twoja (decyzja|kolej|zgoda)|twój (ruch|wybór)|potrzebuj[ęe] (twojej|od ciebie)|daj (mi )?znać|potwierdź|zdecyduj|wybierz|napisz(,| mi)|czekam na (twoj|ciebie|twój))\b/i,
+  /\b(daj (mi )?znać|potwierdź|czekam na (twoj|ciebie|twój)|twojej zgody|twojej decyzji|twojego ok)\b/i,
+]
 
 // ---------------------------------------------------------------------------
 // Section 1: this conversation's open questions
@@ -133,16 +169,25 @@ function cut(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + '…' : text
 }
 
-/** The questions in an assistant message's text: lines ending with `?`. */
-function questionsIn(text: string): string[] {
-  const out: string[] = []
+type Found = { text: string; kind: NeedsInputKind }
+
+/**
+ * What an assistant message asks of the person: lines ending with `?`
+ * (question), and lines that ask for something without one (request).
+ */
+function questionsIn(text: string): Found[] {
+  const out: Found[] = []
   for (const raw of text.split('\n')) {
     const line = cleanLine(raw)
-    if (!line.endsWith('?')) continue
-    // Of a line with several sentences, the question is the last one.
-    const sentences = line.split(/(?<=[.!?])\s+/)
-    const question = sentences.filter(s => s.endsWith('?')).pop() ?? line
-    if (question.length >= 8) out.push(cut(question, 160))
+    if (line.length < 8) continue
+    if (line.endsWith('?')) {
+      // Of a line with several sentences, the question is the last one.
+      const sentences = line.split(/(?<=[.!?])\s+/)
+      const question = sentences.filter(s => s.endsWith('?')).pop() ?? line
+      if (question.length >= 8) out.push({ text: cut(question, 160), kind: 'question' })
+    } else if (REQUEST_PATTERNS.some(pattern => pattern.test(line))) {
+      out.push({ text: cut(line, 160), kind: 'request' })
+    }
   }
   return out
 }
@@ -178,8 +223,8 @@ function collectLocal(rows: readonly SessionMessage[]): LocalItem[] {
         }
       }
     }
-    for (const question of questionsIn(row.text)) {
-      items.push({ key: `${index}:${question}`, question, kind: 'question', messageIndex: index })
+    for (const found of questionsIn(row.text)) {
+      items.push({ key: `${index}:${found.text}`, question: found.text, kind: found.kind, messageIndex: index })
     }
   }
   // The same question asked twice (a wrap-up's ask repeated in the text) shows once.
@@ -236,7 +281,8 @@ function textOf(result: { content: { type: string; text?: string }[] }): string 
 }
 
 async function listSessions($: EngineInterface, limit: number): Promise<SessionRow[]> {
-  const result = await $.mcp.call(SERVER, 'list_sessions', { limit })
+  const result = await withTimeout($, $.mcp.call(SERVER, 'list_sessions', { limit }), CALL_TIMEOUT_MS)
+  if (result === undefined) throw new Error(`list_sessions: no answer within ${CALL_TIMEOUT_MS / 1000} s`)
   const text = textOf(result)
   if (result.isError) throw new Error(text || 'list_sessions failed')
   const start = text.indexOf('[')
@@ -338,23 +384,40 @@ const pending = new Map<string, { tool: string; since: number }>()
 // A tool call pending this long in a running session is taken for a prompt.
 const PENDING_MS = 60_000
 
-async function collectOthers($: EngineInterface, options: Options, now: number): Promise<{ items: NeedsInputItem[]; checked: number; rows: number }> {
+type Others = { items: NeedsInputItem[]; checked: number; skipped: number; rows: number }
+
+async function collectOthers(
+  $: EngineInterface,
+  options: Options,
+  now: number,
+  onProgress: (done: number, total: number) => Promise<void>,
+): Promise<Others> {
   const rows = await listSessions($, options.maxSessions)
-  const items: NeedsInputItem[] = []
-  let checked = 0
-  for (const row of rows) {
-    if (row.isArchived) continue
+  const candidates = rows.filter(row => {
+    if (row.isArchived) return false
     const isRunning = row.isRunning === true
     const lastActivityAt = row.lastActivityAt ?? ''
     const age = lastActivityAt ? now - Date.parse(lastActivityAt) : Infinity
-    if (!isRunning && !(age < options.maxAgeMs)) continue
+    return isRunning || age < options.maxAgeMs
+  })
+  const items: NeedsInputItem[] = []
+  let checked = 0
+  let skipped = 0
+  for (const row of candidates) {
+    const isRunning = row.isRunning === true
+    const lastActivityAt = row.lastActivityAt ?? ''
     checked += 1
     const cached = verdicts.get(row.sessionId)
     let item: NeedsInputItem | null
     if (!isRunning && cached && cached.lastActivityAt === lastActivityAt) {
       item = cached.item
     } else {
-      const result = await $.mcp.call(SERVER, 'list_events', { session_id: row.sessionId, limit: 8 })
+      await onProgress(checked, candidates.length)
+      const result = await withTimeout($, $.mcp.call(SERVER, 'list_events', { session_id: row.sessionId, limit: 8 }), CALL_TIMEOUT_MS)
+      if (result === undefined) {
+        skipped += 1
+        continue
+      }
       let need = result.isError ? null : deriveNeed(textOf(result), isRunning)
       if (need?.pendingTool !== undefined && isRunning) {
         const seen = pending.get(row.sessionId)
@@ -383,7 +446,7 @@ async function collectOthers($: EngineInterface, options: Options, now: number):
   for (const id of [...verdicts.keys()]) if (!listed.has(id)) verdicts.delete(id)
   for (const id of [...pending.keys()]) if (!listed.has(id)) pending.delete(id)
   items.sort((a, b) => Date.parse(b.since) - Date.parse(a.since))
-  return { items, checked, rows: rows.length }
+  return { items, checked, skipped, rows: rows.length }
 }
 
 async function openSession($: EngineInterface, item: NeedsInputItem, lang: Lang): Promise<void> {
@@ -451,21 +514,26 @@ async function refresh($: EngineInterface, options: Options, isAsked = false): P
   isRefreshing = true
   const words = WORDS[options.lang]
   try {
-    await update($, snapshot, snap => ({ ...snap, isChecking: true }))
+    await update($, snapshot, snap => ({ ...snap, isChecking: true, progress: null }))
     const now = await $.clock.now()
     const local = await readLocal($)
-    const others = await collectOthers($, options, now)
+    await update($, snapshot, snap => ({ ...snap, local }))
+    const others = await collectOthers($, options, now, async (done, total) => {
+      await update($, snapshot, snap => ({ ...snap, progress: words.progress(done, total) }))
+    })
     const finishedAt = await $.clock.now()
     await update($, snapshot, () => ({
       local,
       items: others.items,
       checkedAt: finishedAt,
       checked: others.checked,
+      skipped: others.skipped,
+      progress: null,
       error: null,
       isChecking: false,
     }))
     $.ui.status(words.status(local.length, others.items.length))
-    await writeDebug($, options, { finishedAt: new Date(finishedAt).toISOString(), local, checked: others.checked, rows: others.rows, items: others.items })
+    await writeDebug($, options, { finishedAt: new Date(finishedAt).toISOString(), local, checked: others.checked, skipped: others.skipped, rows: others.rows, items: others.items })
 
     const ids = new Set(others.items.map(item => item.sessionId))
     if (knownIds !== null) {
@@ -476,7 +544,7 @@ async function refresh($: EngineInterface, options: Options, isAsked = false): P
     if (isAsked) $.ui.toast(words.refreshed)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await update($, snapshot, snap => ({ ...snap, error: message, isChecking: false }))
+    await update($, snapshot, snap => ({ ...snap, error: message, isChecking: false, progress: null }))
     await writeDebug($, options, { error: message, at: new Date().toISOString() })
   } finally {
     isRefreshing = false
@@ -619,7 +687,8 @@ export const register: Register = (on, rawOptions) => {
             {snap.items.length > 0 ? ` (${snap.items.length})` : ''}
           </Text>
           {snap.items.length === 0 && !snap.isChecking && <Text dimColor>{words.noneOthers}</Text>}
-          {snap.items.length === 0 && snap.isChecking && <Text dimColor>{words.checking}</Text>}
+          {snap.items.length === 0 && snap.isChecking && <Text dimColor>{snap.progress ?? words.checking}</Text>}
+          {snap.skipped > 0 && !snap.isChecking && <Text color="yellow">{words.skipped(snap.skipped)}</Text>}
           {snap.items.map(item => {
             const seconds = Math.max(0, Math.round((now - Date.parse(item.since)) / 1000))
             return (
@@ -639,7 +708,7 @@ export const register: Register = (on, rawOptions) => {
         </Box>
 
         <Text dimColor size="footnote">
-          {snap.isChecking ? words.checking : snap.checkedAt > 0 ? words.checked(snap.checked, clock(snap.checkedAt)) : ''}
+          {snap.isChecking ? snap.progress ?? words.checking : snap.checkedAt > 0 ? words.checked(snap.checked, clock(snap.checkedAt)) : ''}
         </Text>
       </Box>
     )

@@ -43,6 +43,7 @@ session's own transcript:
 | ❓    | pytanie / question      | a line of the assistant's reply that ends with `?`        |
 | ☑    | wybór opcji / choice    | an `AskUserQuestion` prompt that has not been answered    |
 | ⚖    | decyzja / decision      | the question in the turn's wrap-up box                    |
+| ✋    | prośba / request        | a line asking for your input without a question mark ("Next from you: …", "let me know", "daj znać", "potwierdź") |
 
 Click a question to quote it into the prompt box and answer it; tick ✓ to
 dismiss one without answering. The section refreshes after every turn and
@@ -60,7 +61,9 @@ of each session's transcript. A session is listed when that tail ends in:
 | 🔒    | zgoda na narzędzie / approval | a tool call that never got its result (a permission prompt)   |
 
 Each row shows the session title, how long ago it stopped, the kind of input
-needed and the question itself. The app reports a session blocked at a prompt
+needed and the question itself. Every call to the session service gets 15 s;
+a session whose transcript does not arrive in time is skipped for that refresh
+and counted in a yellow line, and the footer shows progress while checking. The app reports a session blocked at a prompt
 as "running", so running sessions are checked too: a pending `AskUserQuestion`
 counts at once, any other pending tool call only after it has stayed pending
 for a minute (a tool may simply be executing). Archived sessions are never
