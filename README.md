@@ -71,6 +71,26 @@ listed. Once you answer, the session stops matching and the row disappears on
 the next refresh. New rows raise a toast, and the status line under the prompt
 shows how many questions wait here and in other sessions.
 
+**Threads (Wątki)**, at the bottom: every question in either section has a
+💬 "wątek" link that opens a side thread on that one topic, a separate
+conversation you discuss it in.
+
+- In the desktop app a thread is a session of its own. The app starts a
+  session at once only on words you typed, so the click puts a "New task" card
+  into the conversation; click the card and the thread starts, nested under the
+  current session in the sidebar. It opens with the question and the message
+  that asked it as context, restates the topic and waits for you.
+- In a terminal session, where the app's session service is absent, the thread
+  is a subagent and the main view switches to it; its agent type is hidden
+  from the model, so Claude never delegates to it on its own.
+
+When you have decided, the thread ends with one line starting with
+`USTALENIE:` (or `DECISION:`) that you can paste into the main conversation.
+The Threads section lists each thread with its state ("kliknij kartę w
+rozmowie" until you start the card); clicking a started thread shows it, ✕
+removes it from the list. A started thread is found by its session title, on
+the next refresh.
+
 ## Using it
 
 - The pane opens by itself when a session starts (unless you closed it by hand
@@ -86,7 +106,9 @@ shows how many questions wait here and in other sessions.
 Options (in the app's config menu under the plugin, or `pluginConfigs` in
 `~/.claude/settings.json`): `intervalSeconds` (20), `maxSessions` (25),
 `maxAgeDays` (14), `language` (`pl` or `en`), `debugFile` (empty; set a path to
-have each refresh write what the pane lists there, for troubleshooting).
+have each refresh write there what the pane lists, plus the first characters of
+the last few transcript rows, and each thread click to a `-actions.txt` file
+beside it; for troubleshooting only).
 
 ## Enable, disable, uninstall (from a local folder, without the marketplace)
 
@@ -131,7 +153,7 @@ A terminal session loads it the same way, or with
 - `.claude-plugin/plugin.json` — manifest and user options
 - `hooks/hooks.json` — names the hooks module
 - `hooks/register.tsx` — the mod: polling, the pane, the slash command
-- `types/index.d.ts` — the state contract (`desktop-sidebar-topics.snapshot`, `.dismissed`)
+- `types/index.d.ts` — the state contract (`desktop-sidebar-topics.snapshot`, `.dismissed`, `.threads`)
 - `install.ps1`, `uninstall.ps1` — enable / disable scripts (see above)
 - `tsconfig.json` — extends the type files the engine lays in
   `.claude-plugin/types/` once the mod has loaded (for an editor or `tsc`)

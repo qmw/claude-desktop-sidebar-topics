@@ -13,6 +13,25 @@ export type NeedsInputItem = {
   since: string
   /** The app link that opens the session (claude://...). */
   link: string
+  /** The tail of that session's transcript, for a thread's context. */
+  context?: string
+}
+
+/** A side thread opened on one topic from the pane. */
+export type Thread = {
+  /** The item's key the thread was opened from (a local key or a session id). */
+  key: string
+  /**
+   * The thread's own id: a session id (`via: 'session'`) or an agent id; ''
+   * while the thread is a proposal card the person has not started yet.
+   */
+  id: string
+  /** The session's title, by which a proposed thread is found once started. */
+  title?: string
+  /** A session of its own (the desktop app) or a subagent (a terminal). */
+  via: 'session' | 'agent'
+  question: string
+  startedAt: number
 }
 
 /** One open question of this conversation. */
@@ -49,6 +68,8 @@ declare module 'claude-code' {
       snapshot: Shaped<NeedsInputSnapshot>
       /** Keys of this conversation's questions the person ticked off. */
       dismissed: Shaped<string[]>
+      /** The side threads opened from the pane, oldest first. */
+      threads: Shaped<Thread[]>
     }
   }
 }
